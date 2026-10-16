@@ -7,6 +7,6 @@ python-dotenv
 pyttsx3
 PyYAML
 Requests
-openai
+openai>=1.40.0
 flask
 duckduckgo-search==5.3.1b1
