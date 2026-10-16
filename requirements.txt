@@ -9,4 +9,4 @@ PyYAML
 Requests
 openai
 flask
-duckduckgo-search
+duckduckgo-search==5.3.1b1
