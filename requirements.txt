@@ -8,4 +8,5 @@ pyttsx3
 PyYAML
 Requests
 openai
+flask
 duckduckgo-search
