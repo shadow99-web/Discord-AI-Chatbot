@@ -21,7 +21,7 @@ class HelpCog(commands.Cog):
             embed.add_field(name=command.name,
                             value=command_description, inline=False)
 
-        embed.set_footer(text=f"{current_language['help_footer']}")
+        embed.set_footer(text=f"Made by 🔥shadow </> by ♥️")
         
         await ctx.send(embed=embed)
 
