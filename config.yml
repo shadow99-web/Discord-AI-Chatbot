@@ -5,7 +5,7 @@ MAX_SEARCH_RESULTS: 4 # Set the maximum search results for internet access DONT 
 ALLOW_DM: true # Set to true to allow direct messages
 SMART_MENTION: true # Set to true to enable smart mention feature
 
-MODEL_ID: llama-3.3-70b-versatile # Model used for chat completion
+MODEL_ID: MODEL_ID: llama-3.1-8b-instant # Model used for chat completion
 MAX_HISTORY: 8 # Set the maximum message history
 
 PRESENCES_CHANGE_DELAY: 8 # Please note that the Presences Change Delay is measured in seconds. It is advisable not to set it too low, as doing so may result in your bot being rate-limited by Discord
@@ -16,7 +16,6 @@ LANGUAGE: en # Specify the language code (check 'lang' folder for valid codes)
 DEFAULT_INSTRUCTION: assist # Specify the instruction prompt to use (check 'instructions' folder for valid prompts)
 # To add custom prompts, create a .txt file like 'custom.txt' in `instructions` folder and set INSTRUCTIONS as 'custom'
 
-Discord: https://discord.gg/6MT3CZauT8
 Github: https://github.com/mishalhossin/Discord-AI-Chatbot
 
 TRIGGER:
@@ -33,7 +32,6 @@ DISABLE_PRESENCE: false
 PRESENCES:
   - How can I assist you?
   - Currently in {guild_count} guilds
-  - Support at https://discord.gg/inhumane
   - Made by 🔥 shadow </> with ♥️
 # List of different presences to be used
 
