@@ -67,7 +67,7 @@ class AIBot(commands.AutoShardedBot):
             await self.load_extension(f"{cog}")
             
         print('If syncing commands is taking longer than usual you are being ratelimited')
-       # await self.tree.sync()
+        await self.tree.sync()
         discord.client._log.info(f"Loaded {len(self.commands)} commands")
 
     async def keep_alive_ping(self):
