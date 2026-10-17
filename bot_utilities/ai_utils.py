@@ -24,14 +24,13 @@ except Exception as e:
 
 
 async def generate_response(instructions, history):
-    # Use gemini-3.8-flash from your configuration
     model_id = config.get("MODEL_ID", "gemini-3.8-flash")
     
     prompt_text = ""
     if instructions:
         prompt_text += f"System Directive / Context: {instructions}\n\n"
 
-    # Slice history to the last 4 messages to keep payloads tiny and instantaneous
+    # Slice history to the last 4 messages to keep payloads tiny
     recent_history = history[-4:] if len(history) > 4 else history
 
     for msg in recent_history:
@@ -39,18 +38,15 @@ async def generate_response(instructions, history):
         prompt_text += f"{role_label}: {msg['content']}\n"
 
     try:
-        # Define the blocking SDK call to run safely in a background thread
         def _call_gemini():
             return client.interactions.create(
                 model=model_id,
                 input=prompt_text,
             )
 
-        # Offload to thread so Discord's event loop stays completely unblocked
-        interaction = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=30.0)
+        # Run in a background thread without a restrictive timeout limit
+        interaction = await asyncio.to_thread(_call_gemini)
         return interaction.output_text
-    except asyncio.TimeoutError:
-        return "⏱️ The AI took too long to respond. Please try again!"
     except Exception as e:
         print(f"🔥 INTERACTIONS API CRITICAL ERROR: {str(e)}")
         return f"I encountered an error: `{str(e)[:100]}`"
@@ -108,4 +104,4 @@ async def generate_image_prodia(prompt, model, sampler, seed, neg):
                         duration = time.time() - start_time
                         print(f"\033[1;34m(Prodia) Finished image creation\n\033[0mJob id : {job_id}  Prompt : ", prompt, "in", duration, "seconds.")
                         return img_file_obj
-                        
+    
