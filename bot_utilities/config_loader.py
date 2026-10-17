@@ -1,45 +1,51 @@
+import os
 import yaml
 import json
-import os
 
-# Config load
-with open('config.yml', 'r', encoding='utf-8') as config_file:
-    config = yaml.safe_load(config_file)
+def load_config():
+    config_path = "config.yml"
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    return {}
 
-## Language settings ##
-valid_language_codes = []
-lang_directory = "lang"
+config = load_config()
 
-current_language_code = config['LANGUAGE']
-
-for filename in os.listdir(lang_directory):
-    if filename.startswith("lang.") and filename.endswith(".json") and os.path.isfile(
-            os.path.join(lang_directory, filename)):
-        language_code = filename.split(".")[1]
-        valid_language_codes.append(language_code)
-
-def load_current_language() -> dict:
-    lang_file_path = os.path.join(
-        lang_directory, f"lang.{current_language_code}.json")
-    with open(lang_file_path, encoding="utf-8") as lang_file:
-        current_language = json.load(lang_file)
-    return current_language
-
-# Instructions loader
-def load_instructions() -> dict:
+def load_instructions():
     instructions = {}
-    for file_name in os.listdir("instructions"):
-        if file_name.endswith('.txt'):
-            file_path = os.path.join("instructions", file_name)
-            with open(file_path, 'r', encoding='utf-8') as file:
-                file_content = file.read()
-            # Use the file name without extension as the variable name
-                variable_name = file_name.split('.')[0]
-                instructions[variable_name] = file_content
+    instructions_dir = "instructions"
+    if os.path.exists(instructions_dir):
+        for filename in os.listdir(instructions_dir):
+            if filename.endswith(".txt"):
+                name = filename[:-4]
+                path = os.path.join(instructions_dir, filename)
+                with open(path, "r", encoding="utf-8") as f:
+                    instructions[name] = f.read().strip()
     return instructions
 
-def load_active_channels() -> dict:
-    if os.path.exists("channels.json"):
-        with open("channels.json", "r", encoding='utf-8') as f:
-            active_channels = json.load(f)
-    return active_channels
+def load_current_language():
+    lang_code = config.get("LANGUAGE", "en")
+    lang_path = f"lang/lang.{lang_code}.json"
+    if os.path.exists(lang_path):
+        with open(lang_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    # Fallback to English if specified language file is missing
+    fallback_path = "lang/lang.en.json"
+    if os.path.exists(fallback_path):
+        with open(fallback_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def load_active_channels():
+    channels_path = "channels.json"
+    if os.path.exists(channels_path):
+        try:
+            with open(channels_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if not content:
+                    return {}
+                return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+    
