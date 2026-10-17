@@ -1,12 +1,14 @@
 import os
 import asyncio
+import io
 import time
 import random
-import io
 from urllib.parse import quote
+
 import aiohttp
 from dotenv import load_dotenv
 from google import genai
+
 from bot_utilities.config_loader import config
 
 load_dotenv()
@@ -16,44 +18,60 @@ api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 if not api_key:
     print("❌ ERROR: GEMINI_API_KEY or GOOGLE_API_KEY is missing from environment variables!")
 
-# Initialize the official Google GenAI client natively
 try:
     client = genai.Client(api_key=api_key) if api_key else genai.Client()
 except Exception as e:
     print(f"❌ Failed to initialize GenAI Client: {e}")
+    client = None
 
-# Performance & Concurrency Controls
-GENAI_CALL_TIMEOUT = float(config.get("GENAI_CALL_TIMEOUT", 25.0))
+# Tunables
+GENAI_TIMEOUT = float(config.get("GENAI_TIMEOUT", 20))
 GENAI_RETRIES = int(config.get("GENAI_RETRIES", 2))
-_genai_semaphore = asyncio.Semaphore(int(config.get("GENAI_CONCURRENCY", 4)))
+GENAI_MAX_OUTPUT_TOKENS = int(config.get("GENAI_MAX_OUTPUT_TOKENS", 512))
+GENAI_TEMPERATURE = float(config.get("GENAI_TEMPERATURE", 0.3))
+GENAI_PROMPT_TOKEN_BUDGET = int(config.get("GENAI_PROMPT_TOKEN_BUDGET", 2200))
+GENAI_CONCURRENCY = int(config.get("GENAI_CONCURRENCY", 4))
+
+PRODIA_API_KEY = os.getenv("PRODIA_API_KEY")
+PRODIA_TIMEOUT = float(os.getenv("PRODIA_TIMEOUT", "120"))
+PRODIA_POLL_INTERVAL = float(os.getenv("PRODIA_POLL_INTERVAL", "1.5"))
+PRODIA_STEPS_DEFAULT = int(os.getenv("PRODIA_STEPS", "18"))
+PRODIA_CONCURRENCY = int(os.getenv("PRODIA_CONCURRENCY", "3"))
+
+genai_semaphore = asyncio.Semaphore(GENAI_CONCURRENCY)
+prodia_semaphore = asyncio.Semaphore(PRODIA_CONCURRENCY)
 
 
 def _estimate_tokens(text: str) -> int:
-    # Fast character-to-token heuristic (approx 4 chars per token)
     return max(1, int(len(text) / 4))
 
 
 async def generate_response(instructions, history):
+    if client is None:
+        return "❌ Gemini client is not initialized. Check your API key."
+
     model_id = config.get("MODEL_ID", "gemini-3.8-flash")
-    
+
     prompt_parts = []
     if instructions:
         prompt_parts.append(f"System Directive / Context: {instructions}\n\n")
 
-    # Token-budget-aware history trimming (defaults to ~2400 token ceiling)
-    max_prompt_tokens = int(config.get("MODEL_PROMPT_TOKEN_BUDGET", 2400))
     total_tokens = _estimate_tokens("".join(prompt_parts))
-    
     selected = []
+
     for msg in reversed(history):
-        role_label = "User" if msg.get("role") == "user" else "Assistant"
-        piece = f"{role_label}: {msg.get('content', '')}\n"
-        piece_tokens = _estimate_tokens(piece)
-        if total_tokens + piece_tokens > max_prompt_tokens:
+        role = msg.get("role", "user")
+        content = str(msg.get("content", ""))
+        role_label = "User" if role == "user" else "Assistant"
+        chunk = f"{role_label}: {content}\n"
+        chunk_tokens = _estimate_tokens(chunk)
+
+        if total_tokens + chunk_tokens > GENAI_PROMPT_TOKEN_BUDGET:
             break
-        selected.append(piece)
-        total_tokens += piece_tokens
-    
+
+        selected.append(chunk)
+        total_tokens += chunk_tokens
+
     selected.reverse()
     prompt_text = "".join(prompt_parts) + "".join(selected)
 
@@ -61,85 +79,162 @@ async def generate_response(instructions, history):
         return client.interactions.create(
             model=model_id,
             input=prompt_text,
+            temperature=GENAI_TEMPERATURE,
+            max_output_tokens=GENAI_MAX_OUTPUT_TOKENS,
         )
 
-    # Execute with semaphore protection, timeout, and simple retries
-    async with _genai_semaphore:
-        last_exc = None
+    async with genai_semaphore:
+        last_error = None
+
         for attempt in range(GENAI_RETRIES + 1):
             try:
-                task = asyncio.to_thread(_call_gemini_blocking)
-                interaction = await asyncio.wait_for(task, timeout=GENAI_CALL_TIMEOUT)
-                return interaction.output_text
-            except asyncio.TimeoutError as te:
-                last_exc = te
-                await asyncio.sleep(0.5 * (attempt + 1))
-            except Exception as e:
-                last_exc = e
-                await asyncio.sleep(0.5 * (attempt + 1))
+                interaction = await asyncio.wait_for(
+                    asyncio.to_thread(_call_gemini_blocking),
+                    timeout=GENAI_TIMEOUT
+                )
 
-        print(f"🔥 INTERACTIONS API CRITICAL ERROR: {last_exc}")
-        return f"I encountered an error: `{str(last_exc)[:100]}`"
+                output_text = getattr(interaction, "output_text", None)
+
+                if not output_text and isinstance(interaction, dict):
+                    output_text = (
+                        interaction.get("output", {}).get("text")
+                        or interaction.get("text")
+                        or str(interaction)
+                    )
+
+                if not output_text:
+                    output_text = str(interaction)
+
+                return output_text
+
+            except asyncio.TimeoutError as e:
+                last_error = e
+                await asyncio.sleep(0.6 * (attempt + 1))
+
+            except Exception as e:
+                last_error = e
+                await asyncio.sleep(0.6 * (attempt + 1))
+
+        print(f"🔥 INTERACTIONS API CRITICAL ERROR: {last_error}")
+        return f"I encountered an error: `{str(last_error)[:100]}`"
 
 
 async def poly_image_gen(session, prompt):
     seed = random.randint(1, 100000)
-    image_url = f"https://image.pollinations.ai/prompt/{prompt}?seed={seed}"
-    async with session.get(image_url) as response:
+    encoded_prompt = quote(prompt)
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?seed={seed}"
+
+    async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=60)) as response:
+        response.raise_for_status()
         image_data = await response.read()
         return io.BytesIO(image_data)
 
 
-async def generate_image_prodia(prompt, model, sampler, seed, neg):
+async def generate_image_prodia(session, prompt, model="midjourney", sampler="ddim", seed=None, neg=None,
+                               steps=None, timeout=None):
+    if session is None:
+        timeout_obj = aiohttp.ClientTimeout(total=180)
+        async with aiohttp.ClientSession(timeout=timeout_obj) as temp_session:
+            return await generate_image_prodia(temp_session, prompt, model, sampler, seed, neg, steps, timeout)
+        return
+
+    steps = steps or PRODIA_STEPS_DEFAULT
+    timeout = timeout or PRODIA_TIMEOUT
+
     print("\033[1;32m(Prodia) Creating image for :\033[0m", prompt)
     start_time = time.time()
-    
-    async def create_job(prompt, model, sampler, seed, neg):
-        if neg is None:
-            negative = "(nsfw:1.5),verybadimagenegative_v1.3, ng_deepnegative_v1_75t, (ugly face:0.8),cross-eyed,sketches, (worst quality:2), (low quality:2), (normal quality:2), lowres, normal quality, ((monochrome)), ((grayscale)), skin spots, acnes, skin blemishes, bad anatomy, DeepNegative, facing away, tilted head, {Multiple people}, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worstquality, low quality, normal quality, jpegartifacts, signature, watermark, username, blurry, bad feet, cropped, poorly drawn hands, poorly drawn face, mutation, deformed, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, extra fingers, fewer digits, extra limbs, extra arms,extra legs, malformed limbs, fused fingers, too many fingers, long neck, cross-eyed,mutated hands, polar lowres, bad body, bad proportions, gross proportions, text, error, missing fingers, missing arms, missing legs, extra digit, extra arms, extra leg, extra foot, repeating hair, nsfw, [[[[[bad-artist-anime, sketch by bad-artist]]]]], [[[mutation, lowres, bad hands, [text, signature, watermark, username], blurry, monochrome, grayscale, realistic, simple background, limited palette]]], close-up, (swimsuit, cleavage, armpits, ass, navel, cleavage cutout), (forehead jewel:1.2), (forehead mark:1.5), (bad and mutated hands:1.3), (worst quality:2.0), (low quality:2.0), (blurry:2.0), multiple limbs, bad anatomy, (interlocked fingers:1.2),(interlocked leg:1.2), Ugly Fingers, (extra digit and hands and fingers and legs and arms:1.4), crown braid, (deformed fingers:1.2), (long fingers:1.2)"
-        else:
-            negative = neg
-            
-        url = 'https://api.prodia.com/generate'
-        params = {
-            'new': 'true',
-            'prompt': f'{quote(prompt)}',
-            'model': model,
-            'negative_prompt': f"{negative}",
-            'steps': '25',
-            'cfg': '7.0',
-            'seed': f'{seed}',
-            'sampler': sampler,
-            'upscale': 'False',
-            'aspect_ratio': 'square'
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as response:
-                data = await response.json()
-                return data['job']
-            
-    job_id = await create_job(prompt, model, sampler, seed, neg)
-    url = f'https://api.prodia.com/job/{job_id}'
+
+    if neg is None:
+        negative = (
+            "(nsfw:1.5),verybadimagenegative_v1.3,ng_deepnegative_v1_75t,"
+            "(ugly face:0.8),cross-eyed,sketches,(worst quality:2),"
+            "(low quality:2),(normal quality:2),lowres"
+        )
+    else:
+        negative = neg
+
     headers = {
-        'authority': 'api.prodia.com',
-        'accept': '*/*',
+        "Accept": "application/json",
+        "Content-Type": "application/json",
     }
 
-    # Use a persistent session with timeout and a non-blocking poll loop (`await asyncio.sleep(1)`)
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-        while True:
-            async with session.get(url, headers=headers) as response:
-                json_data = await response.json()
-                if json_data.get('status') == 'succeeded':
-                    async with session.get(f'https://images.prodia.xyz/{job_id}.png?download=1', headers=headers) as img_resp:
-                        content = await img_resp.content.read()
-                        img_file_obj = io.BytesIO(content)
-                        duration = time.time() - start_time
-                        print(f"\033[1;34m(Prodia) Finished image creation\n\033[0mJob id : {job_id}  Prompt : {prompt} in {duration} seconds.")
-                        return img_file_obj
-                elif json_data.get('status') in ('failed', 'error'):
+    if PRODIA_API_KEY:
+        headers["Authorization"] = f"Bearer {PRODIA_API_KEY}"
+
+    payload = {
+        "new": True,
+        "prompt": prompt,
+        "model": model,
+        "negative_prompt": negative,
+        "steps": steps,
+        "cfg": 7.0,
+        "seed": seed if seed is not None else -1,
+        "sampler": sampler,
+        "upscale": False,
+        "aspect_ratio": "square"
+    }
+
+    async with prodia_semaphore:
+        try:
+            async with session.post(
+                "https://api.prodia.com/generate",
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+
+            job_id = data.get("job")
+            if not job_id:
+                raise RuntimeError(f"Prodia did not return a job id: {data}")
+
+            job_url = f"https://api.prodia.com/job/{job_id}"
+            image_url = f"https://images.prodia.xyz/{job_id}.png?download=1"
+
+            deadline = time.time() + timeout
+
+            while time.time() < deadline:
+                try:
+                    async with session.get(
+                        job_url,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=60)
+                    ) as status_resp:
+                        status_resp.raise_for_status()
+                        json_data = await status_resp.json()
+                except Exception:
+                    await asyncio.sleep(PRODIA_POLL_INTERVAL)
+                    continue
+
+                status = str(json_data.get("status", "")).lower()
+
+                if status in ("succeeded", "completed"):
+                    try:
+                        async with session.get(
+                            image_url,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=60)
+                        ) as img_resp:
+                            img_resp.raise_for_status()
+                            content = await img_resp.read()
+                            img_file_obj = io.BytesIO(content)
+                            duration = time.time() - start_time
+                            print(
+                                f"\033[1;34m(Prodia) Finished image creation\n\033[0mJob id : {job_id}  "
+                                f"Prompt : {prompt} in {duration:.2f} seconds."
+                            )
+                            return img_file_obj
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to fetch image bytes: {e}")
+
+                if status in ("failed", "error"):
                     raise RuntimeError(f"Prodia job failed: {json_data}")
-            
-            # Prevent CPU burn and rate limits with a polite 1-second delay between checks
-            await asyncio.sleep(1.0)
-    
+
+                await asyncio.sleep(PRODIA_POLL_INTERVAL)
+
+            raise TimeoutError(f"Prodia job {job_id} timed out after {timeout} seconds")
+
+        except Exception as e:
+            print(f"🔥 Prodia error: {e}")
+            raise
