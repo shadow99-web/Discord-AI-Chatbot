@@ -1,85 +1,60 @@
 import os
+import asyncio
 from google import genai
-from google.genai import types
 from dotenv import load_dotenv
-from gtts import gTTS
 import io
 import time
 import random
 from urllib.parse import quote
 import aiohttp
-from langdetect import detect
-from duckduckgo_search import DDGS
 from bot_utilities.config_loader import config
 
 load_dotenv()
 
-# Safe fallback check across both common Gemini API key environment names
 api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 if not api_key:
     print("❌ ERROR: GEMINI_API_KEY or GOOGLE_API_KEY is missing from environment variables!")
 
-# 🛠️ FIXED: Match the successful curl test by targeting the v1beta API version
+# Initialize the official Google GenAI client natively
 try:
-    client = genai.Client(
-        api_key=api_key, 
-        http_options=types.HttpOptions(api_version="v1beta")
-    ) if api_key else genai.Client()
+    client = genai.Client(api_key=api_key) if api_key else genai.Client()
 except Exception as e:
     print(f"❌ Failed to initialize GenAI Client: {e}")
 
 
 async def generate_response(instructions, history):
-    model_id = config.get("MODEL_ID", "gemini-2.5-flash")
-    internet_access = config.get("INTERNET_ACCESS", True)
-    max_results = config.get("MAX_SEARCH_RESULTS", 4)
+    # Use gemini-3.8-flash from your configuration
+    model_id = config.get("MODEL_ID", "gemini-3.8-flash")
     
-    # Format the message history into Gemini content format
-    contents = []
-    
-    # Add system instructions / persona context as the first turns
-    formatted_history = []
+    prompt_text = ""
     if instructions:
-        formatted_history.append({"role": "user", "parts": [{"text": f"System Directive / Context: {instructions}"}]})
-        formatted_history.append({"role": "model", "parts": [{"text": "Understood. I will adopt this persona and guidelines."}]})
+        prompt_text += f"System Directive / Context: {instructions}\n\n"
 
-    for msg in history:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+    # Slice history to the last 4 messages to keep payloads tiny and instantaneous
+    recent_history = history[-4:] if len(history) > 4 else history
 
-    full_contents = formatted_history + contents if instructions else contents
-
-    # Perform DuckDuckGo search lookup if internet access is enabled
-    search_context = ""
-    if internet_access and history:
-        latest_query = history[-1]["content"]
-        try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(latest_query, max_results=max_results))
-                if results:
-                    search_context = "\n\nRealtime Web Search Results:\n"
-                    for r in results:
-                        search_context += f"- {r.get('title')}: {r.get('body')} ({r.get('href')})\n"
-        except Exception as e:
-            print(f"Search error: {e}")
-
-    if search_context and full_contents:
-        full_contents[-1]["parts"][0]["text"] += search_context
+    for msg in recent_history:
+        role_label = "User" if msg["role"] == "user" else "Assistant"
+        prompt_text += f"{role_label}: {msg['content']}\n"
 
     try:
-        response = client.models.generate_content(
-            model=model_id,
-            contents=full_contents,
-            config=types.GenerateContentConfig(
-                temperature=0.7,
-            ),
-        )
-        return response.text
+        # Define the blocking SDK call to run safely in a background thread
+        def _call_gemini():
+            return client.interactions.create(
+                model=model_id,
+                input=prompt_text,
+            )
+
+        # Offload to thread so Discord's event loop stays completely unblocked
+        interaction = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=30.0)
+        return interaction.output_text
+    except asyncio.TimeoutError:
+        return "⏱️ The AI took too long to respond. Please try again!"
     except Exception as e:
-        # PRINT THE EXACT REAL ERROR TO RENDER LOGS FOR EASY DEBUGGING
-        print(f"🔥 GEMINI API CRITICAL ERROR DETAIL: {str(e)}")
-        return f"I encountered an error: `{str(e)[:100]}`. Please check my configuration keys!"
+        print(f"🔥 INTERACTIONS API CRITICAL ERROR: {str(e)}")
+        return f"I encountered an error: `{str(e)[:100]}`"
+
 
 async def poly_image_gen(session, prompt):
     seed = random.randint(1, 100000)
@@ -87,6 +62,7 @@ async def poly_image_gen(session, prompt):
     async with session.get(image_url) as response:
         image_data = await response.read()
         return io.BytesIO(image_data)
+
 
 async def generate_image_prodia(prompt, model, sampler, seed, neg):
     print("\033[1;32m(Prodia) Creating image for :\033[0m", prompt)
@@ -102,11 +78,11 @@ async def generate_image_prodia(prompt, model, sampler, seed, neg):
             'prompt': f'{quote(prompt)}',
             'model': model,
             'negative_prompt': f"{negative}",
-            'steps': '100',
-            'cfg': '9.5',
+            'steps': '25',
+            'cfg': '7.0',
             'seed': f'{seed}',
             'sampler': sampler,
-            'upscale': 'True',
+            'upscale': 'False',
             'aspect_ratio': 'square'
         }
         async with aiohttp.ClientSession() as session:
@@ -132,16 +108,4 @@ async def generate_image_prodia(prompt, model, sampler, seed, neg):
                         duration = time.time() - start_time
                         print(f"\033[1;34m(Prodia) Finished image creation\n\033[0mJob id : {job_id}  Prompt : ", prompt, "in", duration, "seconds.")
                         return img_file_obj
-
-async def text_to_speech(text):
-    try:
-        bytes_obj = io.BytesIO()
-        detected_language = detect(text)
-        tts = gTTS(text=text, lang=detected_language)
-        tts.write_to_fp(bytes_obj)
-        bytes_obj.seek(0)
-        return bytes_obj
-    except Exception as e:
-        print(f"TTS Error: {e}")
-        return None
-        
+                        
