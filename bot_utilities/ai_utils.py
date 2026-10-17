@@ -1,4 +1,3 @@
-
 import os
 from google import genai
 from google.genai import types
@@ -14,10 +13,18 @@ from duckduckgo_search import DDGS
 from bot_utilities.config_loader import config
 
 load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY")
 
-# Initialize the official Google GenAI client
-client = genai.Client(api_key=api_key)
+# Safe fallback check across both common Gemini API key environment names
+api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+if not api_key:
+    print("❌ ERROR: GEMINI_API_KEY or GOOGLE_API_KEY is missing from environment variables!")
+
+# Initialize the official Google GenAI client safely
+try:
+    client = genai.Client(api_key=api_key) if api_key else genai.Client()
+except Exception as e:
+    print(f"❌ Failed to initialize GenAI Client: {e}")
 
 async def generate_response(instructions, history):
     model_id = config.get("MODEL_ID", "gemini-2.5-flash")
@@ -66,8 +73,9 @@ async def generate_response(instructions, history):
         )
         return response.text
     except Exception as e:
-        print(f"Gemini API Error: {e}")
-        return "I encountered an error while trying to think of a response. Please check my configuration keys!"
+        # PRINT THE EXACT REAL ERROR TO RENDER LOGS FOR EASY DEBUGGING
+        print(f"🔥 GEMINI API CRITICAL ERROR DETAIL: {str(e)}")
+        return f"I encountered an error: `{str(e)[:100]}`. Please check my configuration keys!"
 
 async def poly_image_gen(session, prompt):
     seed = random.randint(1, 100000)
@@ -132,3 +140,4 @@ async def text_to_speech(text):
     except Exception as e:
         print(f"TTS Error: {e}")
         return None
+        
