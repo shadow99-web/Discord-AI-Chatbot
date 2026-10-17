@@ -20,15 +20,15 @@ api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 if not api_key:
     print("❌ ERROR: GEMINI_API_KEY or GOOGLE_API_KEY is missing from environment variables!")
 
-# 🛠️ FIXED: Initialize the client explicitly targeting the v1alpha API version 
-# to ensure modern project-linked tokens (AQ. keys) authenticate correctly.
+# 🛠️ FIXED: Match the successful curl test by targeting the v1beta API version
 try:
     client = genai.Client(
         api_key=api_key, 
-        http_options=types.HttpOptions(api_version="v1alpha")
+        http_options=types.HttpOptions(api_version="v1beta")
     ) if api_key else genai.Client()
 except Exception as e:
     print(f"❌ Failed to initialize GenAI Client: {e}")
+
 
 async def generate_response(instructions, history):
     model_id = config.get("MODEL_ID", "gemini-2.5-flash")
