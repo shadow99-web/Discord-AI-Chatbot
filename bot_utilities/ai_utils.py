@@ -1,101 +1,73 @@
-import aiohttp
+
+import os
+from google import genai
+from google.genai import types
+from dotenv import load_dotenv
+from gtts import gTTS
 import io
 import time
-import os
 import random
-import json
-from langdetect import detect
-from gtts import gTTS
 from urllib.parse import quote
-from bot_utilities.config_loader import load_current_language, config
-from openai import AsyncOpenAI
-from duckduckgo_search import AsyncDDGS
-from dotenv import load_dotenv
+import aiohttp
+from langdetect import detect
+from duckduckgo_search import DDGS
+from bot_utilities.config_loader import config
 
 load_dotenv()
+api_key = os.getenv("GEMINI_API_KEY")
 
-current_language = load_current_language()
-internet_access = config['INTERNET_ACCESS']
-
-client = AsyncOpenAI(
-    base_url=config['API_BASE_URL'],
-    api_key=os.environ.get("API_KEY"),
-)
+# Initialize the official Google GenAI client
+client = genai.Client(api_key=api_key)
 
 async def generate_response(instructions, history):
-    messages = [
-            {"role": "system", "name": "instructions", "content": instructions},
-            *history,
-        ]
+    model_id = config.get("MODEL_ID", "gemini-2.5-flash")
+    internet_access = config.get("INTERNET_ACCESS", True)
+    max_results = config.get("MAX_SEARCH_RESULTS", 4)
+    
+    # Format the message history into Gemini content format
+    contents = []
+    
+    # Add system instructions / persona context as the first turns
+    formatted_history = []
+    if instructions:
+        formatted_history.append({"role": "user", "parts": [{"text": f"System Directive / Context: {instructions}"}]})
+        formatted_history.append({"role": "model", "parts": [{"text": "Understood. I will adopt this persona and guidelines."}]})
 
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "searchtool",
-                "description": "Searches the internet.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The query for search engine",
-                        }
-                    },
-                    "required": ["query"],
-                },
-            },
-        }
-    ]
-    response = await client.chat.completions.create(
-        model=config['MODEL_ID'],
-        messages=messages,        
-        tools=tools,
-        tool_choice="auto",
-    )
-    response_message = response.choices[0].message
-    tool_calls = response_message.tool_calls
+    for msg in history:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
 
-    if tool_calls:
-        available_functions = {
-            "searchtool": duckduckgotool,
-        }
-        messages.append(response_message)
+    full_contents = formatted_history + contents if instructions else contents
 
-        for tool_call in tool_calls:
-            function_name = tool_call.function.name
-            function_to_call = available_functions[function_name]
-            function_args = json.loads(tool_call.function.arguments)
-            function_response = await function_to_call(
-                query=function_args.get("query")
-            )
-            messages.append(
-                {
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": function_name,
-                    "content": function_response,
-                }
-            )
-        second_response = await client.chat.completions.create(
-            model=config['MODEL_ID'],
-            messages=messages
-        ) 
-        return second_response.choices[0].message.content
-    return response_message.content
+    # Perform DuckDuckGo search lookup if internet access is enabled
+    search_context = ""
+    if internet_access and history:
+        latest_query = history[-1]["content"]
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(latest_query, max_results=max_results))
+                if results:
+                    search_context = "\n\nRealtime Web Search Results:\n"
+                    for r in results:
+                        search_context += f"- {r.get('title')}: {r.get('body')} ({r.get('href')})\n"
+        except Exception as e:
+            print(f"Search error: {e}")
 
-async def duckduckgotool(query) -> str:
-    if config['INTERNET_ACCESS']:
-        return "internet access has been disabled by user"
-    blob = ''
-    results = await AsyncDDGS(proxy=None).text(query, max_results=6)
+    if search_context and full_contents:
+        full_contents[-1]["parts"][0]["text"] += search_context
+
     try:
-        for index, result in enumerate(results[:6]):  # Limiting to 6 results
-            blob += f'[{index}] Title : {result["title"]}\nSnippet : {result["body"]}\n\n\n Provide a cohesive response base on provided Search results'
+        response = client.models.generate_content(
+            model=model_id,
+            contents=full_contents,
+            config=types.GenerateContentConfig(
+                temperature=0.7,
+            ),
+        )
+        return response.text
     except Exception as e:
-        blob += f"Search error: {e}\n"
-    return blob
-
+        print(f"Gemini API Error: {e}")
+        return "I encountered an error while trying to think of a response. Please check my configuration keys!"
 
 async def poly_image_gen(session, prompt):
     seed = random.randint(1, 100000)
@@ -140,19 +112,23 @@ async def generate_image_prodia(prompt, model, sampler, seed, neg):
     async with aiohttp.ClientSession() as session:
         while True:
             async with session.get(url, headers=headers) as response:
-                json = await response.json()
-                if json['status'] == 'succeeded':
-                    async with session.get(f'https://images.prodia.xyz/{job_id}.png?download=1', headers=headers) as response:
-                        content = await response.content.read()
+                json_data = await response.json()
+                if json_data['status'] == 'succeeded':
+                    async with session.get(f'https://images.prodia.xyz/{job_id}.png?download=1', headers=headers) as img_resp:
+                        content = await img_resp.content.read()
                         img_file_obj = io.BytesIO(content)
                         duration = time.time() - start_time
                         print(f"\033[1;34m(Prodia) Finished image creation\n\033[0mJob id : {job_id}  Prompt : ", prompt, "in", duration, "seconds.")
                         return img_file_obj
 
 async def text_to_speech(text):
-    bytes_obj = io.BytesIO()
-    detected_language = detect(text)
-    tts = gTTS(text=text, lang=detected_language)
-    tts.write_to_fp(bytes_obj)
-    bytes_obj.seek(0)
-    return bytes_obj
+    try:
+        bytes_obj = io.BytesIO()
+        detected_language = detect(text)
+        tts = gTTS(text=text, lang=detected_language)
+        tts.write_to_fp(bytes_obj)
+        bytes_obj.seek(0)
+        return bytes_obj
+    except Exception as e:
+        print(f"TTS Error: {e}")
+        return None
