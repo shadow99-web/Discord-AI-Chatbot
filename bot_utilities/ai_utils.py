@@ -20,9 +20,13 @@ api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 if not api_key:
     print("❌ ERROR: GEMINI_API_KEY or GOOGLE_API_KEY is missing from environment variables!")
 
-# Initialize the official Google GenAI client safely
+# 🛠️ FIXED: Initialize the client explicitly targeting the v1alpha API version 
+# to ensure modern project-linked tokens (AQ. keys) authenticate correctly.
 try:
-    client = genai.Client(api_key=api_key) if api_key else genai.Client()
+    client = genai.Client(
+        api_key=api_key, 
+        http_options=types.HttpOptions(api_version="v1alpha")
+    ) if api_key else genai.Client()
 except Exception as e:
     print(f"❌ Failed to initialize GenAI Client: {e}")
 
