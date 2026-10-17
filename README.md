@@ -1,4 +1,4 @@
-# Discord AI Chatbot 🤖
+# Discord AI Chatbot 
 
 Your Discord AI companion.
 
