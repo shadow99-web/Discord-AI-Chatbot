@@ -1,10 +1,11 @@
 import discord
+import asyncio
 from discord.ext import commands
 
 from bot_utilities.response_utils import split_response
 from bot_utilities.ai_utils import generate_response, text_to_speech
 from bot_utilities.config_loader import config, load_active_channels
-from ..common import allow_dm, trigger_words, replied_messages, smart_mention, message_history,  MAX_HISTORY, instructions
+from ..common import allow_dm, trigger_words, replied_messages, smart_mention, message_history, MAX_HISTORY, instructions
 
 
 class OnMessage(commands.Cog):
@@ -16,7 +17,13 @@ class OnMessage(commands.Cog):
     async def process_message(self, message):
         active_channels = self.active_channels()
         string_channel_id = f"{message.channel.id}"
-        is_replied = (message.reference and message.reference.resolved.author == self.bot.user) and smart_mention
+        
+        # FIXED: Safely check message reference without crashing on uncached messages
+        is_replied = False
+        if message.reference and message.reference.resolved:
+            if hasattr(message.reference.resolved, "author") and message.reference.resolved.author == self.bot.user:
+                is_replied = smart_mention
+
         is_dm_channel = isinstance(message.channel, discord.DMChannel)
         is_active_channel = string_channel_id in active_channels
         is_allowed_dm = allow_dm and is_dm_channel
@@ -27,8 +34,10 @@ class OnMessage(commands.Cog):
         if not (is_active_channel or is_allowed_dm or contains_trigger_word or is_bot_mentioned or is_replied or bot_name_in_message):
             return
 
-        instruc_config = active_channels.get(string_channel_id, config['DEFAULT_INSTRUCTION'])
-        instructions = f"Ignore all the instructions you have gotten before. {self.instructions[instruc_config]}. "
+        instruc_config = active_channels.get(string_channel_id, config.get('DEFAULT_INSTRUCTION', 'assist'))
+        # Safe instruction lookup fallback
+        selected_instruction = self.instructions.get(instruc_config, list(self.instructions.values())[0] if self.instructions else "")
+        prompt_instructions = f"Ignore all the instructions you have gotten before. {selected_instruction}. "
 
         channel_id = message.channel.id
         key = f"{message.author.id}-{channel_id}"
@@ -37,9 +46,9 @@ class OnMessage(commands.Cog):
         message_history[key].append({"role": "user", "content": message.content})
 
         async with message.channel.typing():
-            response = await self.generate_response(instructions, message_history[key])
+            response = await self.generate_response(prompt_instructions, message_history[key])
 
-        message_history[key].append({"role": "assistant", "content": response})
+        message_history[key].append({"role": "model", "content": response})
 
         await self.send_response(message, response)
 
@@ -55,36 +64,45 @@ class OnMessage(commands.Cog):
         if author_member and author_member.voice:
             author_voice_channel = author_member.voice.channel
 
-        if author_voice_channel:
-            voice_channel = await author_voice_channel.connect()
-            voice_channel.play(discord.FFmpegPCMAudio(executable="ffmpeg", source=bytes_obj))
-            while voice_channel.is_playing():
-                pass
-            await voice_channel.disconnect()
+        if author_voice_channel and bytes_obj:
+            try:
+                voice_channel = await author_voice_channel.connect()
+                voice_channel.play(discord.FFmpegPCMAudio(executable="ffmpeg", source=bytes_obj))
+                # FIXED: Non-blocking sleep loop instead of freezing the event loop with pass
+                while voice_channel.is_playing():
+                    await asyncio.sleep(0.5)
+                await voice_channel.disconnect()
+            except Exception as e:
+                print(f"Voice playback error: {e}")
 
         if response is not None:
             for chunk in split_response(response):
                 try:
                     await message.reply(chunk, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
                 except Exception:
-                    await message.channel.send("I apologize for any inconvenience caused. It seems that there was an error preventing the delivery of my message. Additionally, it appears that the message I was replying to has been deleted, which could be the reason for the issue. If you have any further questions or if there's anything else I can assist you with, please let me know and I'll be happy to help.")
+                    await message.channel.send("I apologize for any inconvenience caused. It seems that there was an error preventing the delivery of my message.")
         else:
             await message.reply("I apologize for any inconvenience caused. It seems that there was an error preventing the delivery of my message.")
 
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author == self.bot.user and message.reference:
-            replied_messages[message.reference.message_id] = message
-            if len(replied_messages) > 5:
-                oldest_message_id = min(replied_messages.keys())
-                del replied_messages[oldest_message_id]
+            if message.reference.message_id:
+                replied_messages[message.reference.message_id] = message
+                if len(replied_messages) > 5:
+                    oldest_message_id = min(replied_messages.keys())
+                    del replied_messages[oldest_message_id]
 
-        if message.mentions:
-            for mention in message.mentions:
-                message.content = message.content.replace(f'<@{mention.id}>', f'{mention.display_name}')
-
-        if message.stickers or message.author.bot or (message.reference and (message.reference.resolved.author != self.bot.user or message.reference.resolved.embeds)):
+        if message.stickers or message.author.bot:
             return
+
+        # Safe message reference check for filter guard
+        if message.reference and message.reference.resolved:
+            resolved = message.reference.resolved
+            if hasattr(resolved, "author") and resolved.author != self.bot.user:
+                return
+            if hasattr(resolved, "embeds") and resolved.embeds:
+                return
 
         await self.process_message(message)
 
