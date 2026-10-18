@@ -14,6 +14,15 @@ from bot_utilities.config_loader import config
 
 load_dotenv()
 
+# Groq first: fast, low-latency chat completions that work well for lightweight models.
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_BASE_URL = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_TIMEOUT = float(os.getenv("GROQ_TIMEOUT", "60"))
+GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.3"))
+GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "512"))
+
+# Gemini fallback config (kept for compatibility if Groq is unavailable)
 api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 if not api_key:
@@ -45,6 +54,91 @@ prodia_semaphore = asyncio.Semaphore(PRODIA_CONCURRENCY)
 
 def _estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / 4))
+
+
+def _build_groq_messages(instructions, history):
+    messages = []
+
+    if instructions:
+        messages.append({"role": "system", "content": str(instructions)})
+
+    for msg in history:
+        if not isinstance(msg, dict):
+            continue
+
+        role = msg.get("role", "user")
+        if role not in {"user", "assistant", "system"}:
+            continue
+
+        content = msg.get("content", "")
+        messages.append({"role": role, "content": str(content)})
+
+    return messages
+
+
+async def _generate_response_groq(instructions, history):
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is missing from environment variables.")
+
+    messages = _build_groq_messages(instructions, history)
+    request_url = f"{GROQ_BASE_URL.rstrip('/')}/chat/completions"
+
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": GROQ_TEMPERATURE,
+        "max_tokens": GROQ_MAX_TOKENS,
+        "stream": False,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=GROQ_TIMEOUT)) as session:
+        async with session.post(request_url, json=payload, headers=headers) as response:
+            try:
+                data = await response.json(content_type=None)
+            except Exception:
+                text = await response.text()
+                raise RuntimeError(f"Groq returned an invalid response: {text[:200]}")
+
+            if response.status >= 400:
+                error_detail = data.get("error") if isinstance(data, dict) else data
+                if isinstance(error_detail, dict):
+                    message = error_detail.get("message") or str(error_detail)
+                else:
+                    message = str(error_detail)
+                raise RuntimeError(f"Groq API error ({response.status}): {message}")
+
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError(f"Groq returned no choices: {data}")
+
+            first_choice = choices[0]
+            message = first_choice.get("message", {})
+            content = message.get("content")
+
+            if isinstance(content, list):
+                text_parts = []
+                for part in content:
+                    if isinstance(part, str):
+                        text_parts.append(part)
+                    elif isinstance(part, dict):
+                        part_text = part.get("text") or part.get("content")
+                        if isinstance(part_text, str):
+                            text_parts.append(part_text)
+                if text_parts:
+                    return "".join(text_parts).strip()
+
+            if isinstance(content, str):
+                return content.strip()
+
+            if isinstance(message, dict):
+                return str(message).strip()
+
+            return str(data).strip()
 
 
 def _extract_gemini_text(response: Any) -> str:
@@ -137,11 +231,7 @@ def _extract_gemini_text(response: Any) -> str:
 
 
 def _call_gemini_blocking(model_id: str, prompt_text: str):
-    """Try multiple GenAI client call patterns to support different SDK versions.
-
-    Returns the raw response object from the first call that succeeds, or raises
-    RuntimeError with detailed attempt errors.
-    """
+    """Fallback pathway for older/newer Gemini SDKs. Try multiple supported client patterns."""
     config_payload = {
         "temperature": GENAI_TEMPERATURE,
         "max_output_tokens": GENAI_MAX_OUTPUT_TOKENS,
@@ -152,22 +242,18 @@ def _call_gemini_blocking(model_id: str, prompt_text: str):
     def try_call(name: str, fn):
         try:
             res = fn()
-            print(f"(Gemini) call succeeded: {name}")
             return res
         except TypeError as e:
             attempts.append((name, e))
-            print(f"(Gemini) TypeError from {name}: {e}")
             return None
         except Exception as e:
             attempts.append((name, e))
-            print(f"(Gemini) Exception from {name}: {e}")
             return None
 
     interactions = getattr(client, "interactions", None)
     responses_api = getattr(client, "responses", None)
     models = getattr(client, "models", None)
 
-    # 1) Try interactions.create with extra_body (newer pattern)
     if interactions is not None and hasattr(interactions, "create"):
         res = try_call("interactions.create(extra_body)", lambda: interactions.create(
             model=model_id, input=prompt_text, extra_body=config_payload
@@ -175,14 +261,12 @@ def _call_gemini_blocking(model_id: str, prompt_text: str):
         if res is not None:
             return res
 
-        # 1b) try simple interactions.create(model, input)
         res = try_call("interactions.create(simple)", lambda: interactions.create(
             model=model_id, input=prompt_text
         ))
         if res is not None:
             return res
 
-    # 2) Try client.responses.create (if present)
     if responses_api is not None and hasattr(responses_api, "create"):
         res = try_call("responses.create(extra_body)", lambda: responses_api.create(
             model=model_id, input=prompt_text, extra_body=config_payload
@@ -196,7 +280,6 @@ def _call_gemini_blocking(model_id: str, prompt_text: str):
         if res is not None:
             return res
 
-    # 3) Try client.generate_content / models.generate_content variants
     if hasattr(client, "generate_content"):
         res = try_call("client.generate_content(config)", lambda: client.generate_content(
             model=model_id, contents=prompt_text, config=config_payload
@@ -223,16 +306,6 @@ def _call_gemini_blocking(model_id: str, prompt_text: str):
         if res is not None:
             return res
 
-    # 4) Try client.generate_text (older/alternate name)
-    if hasattr(client, "generate_text"):
-        res = try_call("client.generate_text", lambda: client.generate_text(
-            model=model_id, prompt=prompt_text, temperature=GENAI_TEMPERATURE,
-            max_output_tokens=GENAI_MAX_OUTPUT_TOKENS
-        ))
-        if res is not None:
-            return res
-
-    # No method worked; raise with collected attempt errors for easier debugging
     if attempts:
         combined = "; ".join(f"{name}: {type(err).__name__}: {str(err)}" for name, err in attempts)
         raise RuntimeError(f"No supported Gemini API call worked: {combined}")
@@ -240,7 +313,7 @@ def _call_gemini_blocking(model_id: str, prompt_text: str):
     raise RuntimeError("No Gemini API method was available on the client instance.")
 
 
-async def generate_response(instructions, history):
+async def _generate_response_gemini(instructions, history):
     if client is None:
         return "❌ Gemini client is not initialized. Check your API key."
 
@@ -288,13 +361,21 @@ async def generate_response(instructions, history):
             except asyncio.TimeoutError as e:
                 last_error = e
                 await asyncio.sleep(0.6 * (attempt + 1))
-
             except Exception as e:
                 last_error = e
                 await asyncio.sleep(0.6 * (attempt + 1))
 
         print(f"🔥 Gemini API critical error: {last_error}")
         return f"I encountered an error: `{str(last_error)[:100]}`"
+
+
+async def generate_response(instructions, history):
+    """Try Groq first for low-latency replies; fall back to Gemini if Groq is unavailable."""
+    try:
+        return await _generate_response_groq(instructions, history)
+    except Exception as e:
+        print(f"⚠️ Groq failed, falling back to Gemini: {e}")
+        return await _generate_response_gemini(instructions, history)
 
 
 async def poly_image_gen(session, prompt):
