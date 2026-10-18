@@ -17,7 +17,7 @@ load_dotenv()
 # Groq first: fast, low-latency chat completions that work well for lightweight models.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_BASE_URL = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL =  ("llama-3.3-70b-versatile")
 GROQ_TIMEOUT = float(os.getenv("GROQ_TIMEOUT", "60"))
 GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.3"))
 GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "512"))
