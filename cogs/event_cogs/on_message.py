@@ -37,8 +37,7 @@ class OnMessage(commands.Cog):
         instruc_config = active_channels.get(string_channel_id, config.get('DEFAULT_INSTRUCTION', 'assist'))
         # Safe instruction lookup fallback
         selected_instruction = self.instructions.get(instruc_config, list(self.instructions.values())[0] if self.instructions else "")
-        prompt_instructions = f"Ignore all the instructions you have gotten before. {selected_instruction}. "
-
+        prompt_instructions = selected_instruction
         channel_id = message.channel.id
         key = f"{message.author.id}-{channel_id}"
         message_history[key] = message_history.get(key, [])
