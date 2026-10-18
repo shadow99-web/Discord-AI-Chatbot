@@ -198,7 +198,7 @@ async def generate_response(instructions, history):
     if client is None:
         return "❌ Gemini client is not initialized. Check your API key."
 
-    model_id = config.get("MODEL_ID", "gemini-2.5-flash")
+    model_id = config.get("MODEL_ID", "gemini-3.8-flash")
 
     prompt_parts = []
     if instructions:
