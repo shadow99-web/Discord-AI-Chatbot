@@ -58,15 +58,19 @@ def _estimate_tokens(text: str) -> int:
 
 def _build_groq_messages(instructions, history):
     messages = []
-
     if instructions:
         messages.append({"role": "system", "content": str(instructions)})
+
+    # Map Gemini-style "model" role to OpenAI-compatible "assistant"
+    ROLE_MAP = {"model": "assistant", "bot": "assistant"}
 
     for msg in history:
         if not isinstance(msg, dict):
             continue
 
-        role = msg.get("role", "user")
+        raw_role = msg.get("role", "user")
+        role = ROLE_MAP.get(raw_role, raw_role)
+
         if role not in {"user", "assistant", "system"}:
             continue
 
@@ -74,7 +78,6 @@ def _build_groq_messages(instructions, history):
         messages.append({"role": role, "content": str(content)})
 
     return messages
-
 
 async def _generate_response_groq(instructions, history):
     if not GROQ_API_KEY:
