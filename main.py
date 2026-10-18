@@ -34,13 +34,10 @@ def keep_alive():
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 
-# 2. Main Bot Class Setup combining AutoSharding, Cogs, and Self-Ping
-class AIBot(commands.AutoShardedBot):
+# 2. Main Bot Class Setup (Standard Bot - Unsharded for peak speed on small servers)
+class AIBot(commands.Bot):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if config['AUTO_SHARDING']:
-            super().__init__(*args, **kwargs)
-        else:
-            super().__init__(shard_count=1, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.web_session = None
 
     async def setup_hook(self) -> None:
@@ -71,7 +68,7 @@ class AIBot(commands.AutoShardedBot):
         discord.client._log.info(f"Loaded {len(self.commands)} commands")
 
     async def keep_alive_ping(self):
-        """Pings its own Render external URL every 3 minutes to prevent spin-down."""
+        """Pings its own Render external URL every 15 minutes to prevent spin-down."""
         await self.wait_until_ready()
         
         while not self.is_closed():
@@ -81,7 +78,7 @@ class AIBot(commands.AutoShardedBot):
             except Exception as e:
                 print(f"[Keep-Alive] Ping failed: {e}")
             
-            # Wait for 3 minutes (180 seconds) before the next ping
+            # Wait for 15 minutes (900 seconds) before the next ping
             await asyncio.sleep(900)
 
     async def close(self):
