@@ -4,6 +4,7 @@ import io
 import time
 import random
 from urllib.parse import quote
+from typing import Any
 
 import aiohttp
 from dotenv import load_dotenv
@@ -46,11 +47,158 @@ def _estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / 4))
 
 
+def _extract_gemini_text(response: Any) -> str:
+    if response is None:
+        return ""
+
+    if isinstance(response, str):
+        return response
+
+    if isinstance(response, dict):
+        candidate = (
+            response.get("output_text")
+            or response.get("text")
+            or response.get("content")
+            or response.get("output")
+        )
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+        if isinstance(candidate, dict):
+            nested = (
+                candidate.get("text")
+                or candidate.get("content")
+                or candidate.get("value")
+            )
+            if isinstance(nested, str) and nested.strip():
+                return nested
+
+        for key in ("candidates", "responses"):
+            items = response.get(key)
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        text = (
+                            item.get("text")
+                            or item.get("content")
+                            or item.get("output_text")
+                        )
+                        if isinstance(text, str) and text.strip():
+                            return text
+                        if isinstance(item.get("parts"), list):
+                            joined_parts = []
+                            for part in item["parts"]:
+                                if isinstance(part, dict):
+                                    part_text = part.get("text") or part.get("content")
+                                    if isinstance(part_text, str):
+                                        joined_parts.append(part_text)
+                                elif isinstance(part, str):
+                                    joined_parts.append(part)
+                            combined = "".join(joined_parts)
+                            if combined.strip():
+                                return combined
+
+        return str(response)
+
+    for attr in ("output_text", "text", "content"):
+        value = getattr(response, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value
+
+    candidates = getattr(response, "candidates", None)
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if hasattr(candidate, "content"):
+                content = getattr(candidate.content, "parts", None)
+                if content:
+                    texts = []
+                    for part in content:
+                        part_text = getattr(part, "text", None)
+                        if isinstance(part_text, str) and part_text.strip():
+                            texts.append(part_text)
+                    if texts:
+                        return "".join(texts)
+            if isinstance(candidate, dict):
+                text = candidate.get("text") or candidate.get("content")
+                if isinstance(text, str) and text.strip():
+                    return text
+
+    parts = getattr(response, "parts", None)
+    if isinstance(parts, list):
+        texts = []
+        for part in parts:
+            part_text = getattr(part, "text", None)
+            if isinstance(part_text, str) and part_text.strip():
+                texts.append(part_text)
+        if texts:
+            return "".join(texts)
+
+    return str(response)
+
+
+def _call_gemini_blocking(model_id: str, prompt_text: str):
+    config_payload = {
+        "temperature": GENAI_TEMPERATURE,
+        "max_output_tokens": GENAI_MAX_OUTPUT_TOKENS,
+    }
+
+    last_error = None
+    methods = []
+
+    models = getattr(client, "models", None)
+    if models is not None and hasattr(models, "generate_content"):
+        methods.append(("models.generate_content", lambda: models.generate_content(
+            model=model_id,
+            contents=prompt_text,
+            config=config_payload,
+        )))
+        methods.append(("models.generate_content_without_config", lambda: models.generate_content(
+            model=model_id,
+            contents=prompt_text,
+        )))
+
+    if hasattr(client, "generate_content"):
+        methods.append(("client.generate_content", lambda: client.generate_content(
+            model=model_id,
+            contents=prompt_text,
+            config=config_payload,
+        )))
+
+    interactions = getattr(client, "interactions", None)
+    if interactions is not None and hasattr(interactions, "create"):
+        methods.append(("interactions.create_extra_body", lambda: interactions.create(
+            model=model_id,
+            input=prompt_text,
+            extra_body=config_payload,
+        )))
+        methods.append(("interactions.create_legacy", lambda: interactions.create(
+            model=model_id,
+            input=prompt_text,
+            temperature=GENAI_TEMPERATURE,
+            max_output_tokens=GENAI_MAX_OUTPUT_TOKENS,
+        )))
+
+    for _, call in methods:
+        try:
+            return call()
+        except TypeError as exc:
+            last_error = exc
+            continue
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        raise RuntimeError(f"No supported Gemini API call worked: {last_error}")
+
+    raise RuntimeError("No Gemini API method was available on the client instance.")
+
+
 async def generate_response(instructions, history):
     if client is None:
         return "❌ Gemini client is not initialized. Check your API key."
 
-    model_id = config.get("MODEL_ID", "gemini-3.8-flash")
+    model_id = config.get("MODEL_ID", "gemini-2.5-flash")
 
     prompt_parts = []
     if instructions:
@@ -75,37 +223,21 @@ async def generate_response(instructions, history):
     selected.reverse()
     prompt_text = "".join(prompt_parts) + "".join(selected)
 
-    def _call_gemini_blocking():
-        return client.interactions.create(
-            model=model_id,
-            input=prompt_text,
-            temperature=GENAI_TEMPERATURE,
-            max_output_tokens=GENAI_MAX_OUTPUT_TOKENS,
-        )
-
     async with genai_semaphore:
         last_error = None
 
         for attempt in range(GENAI_RETRIES + 1):
             try:
                 interaction = await asyncio.wait_for(
-                    asyncio.to_thread(_call_gemini_blocking),
-                    timeout=GENAI_TIMEOUT
+                    asyncio.to_thread(_call_gemini_blocking, model_id, prompt_text),
+                    timeout=GENAI_TIMEOUT,
                 )
 
-                output_text = getattr(interaction, "output_text", None)
-
-                if not output_text and isinstance(interaction, dict):
-                    output_text = (
-                        interaction.get("output", {}).get("text")
-                        or interaction.get("text")
-                        or str(interaction)
-                    )
-
-                if not output_text:
+                output_text = _extract_gemini_text(interaction)
+                if not output_text or not str(output_text).strip():
                     output_text = str(interaction)
 
-                return output_text
+                return output_text.strip() or "I generated an empty response."
 
             except asyncio.TimeoutError as e:
                 last_error = e
@@ -115,7 +247,7 @@ async def generate_response(instructions, history):
                 last_error = e
                 await asyncio.sleep(0.6 * (attempt + 1))
 
-        print(f"🔥 INTERACTIONS API CRITICAL ERROR: {last_error}")
+        print(f"🔥 Gemini API critical error: {last_error}")
         return f"I encountered an error: `{str(last_error)[:100]}`"
 
 
