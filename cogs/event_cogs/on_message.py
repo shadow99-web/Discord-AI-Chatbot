@@ -47,7 +47,7 @@ class OnMessage(commands.Cog):
         async with message.channel.typing():
             response = await self.generate_response(prompt_instructions, message_history[key])
 
-        message_history[key].append({"role": "model", "content": response})
+        message_history[key].append({"role": "assistant", "content": response})
 
         await self.send_response(message, response)
 
