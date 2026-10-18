@@ -1,9 +1,8 @@
 import discord
 from discord.ext import commands
-import json
 
 from ..common import current_language, instructions, instruc_config, message_history
-from bot_utilities.config_loader import load_active_channels
+from bot_utilities.config_loader import load_active_channels, save_active_channels
 
 DEFAULT_PERSONA = instruc_config
 
@@ -19,19 +18,14 @@ class ChatConfigCog(commands.Cog):
     ])
     @commands.has_permissions(administrator=True)
     async def toggleactive(self, ctx, persona: discord.app_commands.Choice[str] = DEFAULT_PERSONA):
-        # Get the string value of the choice
         persona_value = getattr(persona, "value", persona) or instruc_config
 
         channel_id = f"{ctx.channel.id}"
         active_channels = self.active_channels()
 
-        # ALWAYS set the channel (no more toggling off)
         active_channels[channel_id] = persona_value
+        save_active_channels(active_channels) # 🚨 Use new instant save
 
-        with open("channels.json", "w", encoding="utf-8") as f:
-            json.dump(active_channels, f, indent=4)
-
-        # Tell the user exactly what was saved
         await ctx.send(f"{ctx.channel.mention} is now active with persona: **{persona_value}**", delete_after=5)
 
     @commands.hybrid_command(name="disableactive", description="Disable the bot in this channel.")
@@ -42,8 +36,7 @@ class ChatConfigCog(commands.Cog):
         
         if channel_id in active_channels:
             del active_channels[channel_id]
-            with open("channels.json", "w", encoding="utf-8") as f:
-                json.dump(active_channels, f, indent=4)
+            save_active_channels(active_channels) # 🚨 Use new instant save
             await ctx.send(f"{ctx.channel.mention} has been deactivated.", delete_after=5)
         else:
             await ctx.send(f"{ctx.channel.mention} is already inactive.", delete_after=5)
