@@ -137,59 +137,105 @@ def _extract_gemini_text(response: Any) -> str:
 
 
 def _call_gemini_blocking(model_id: str, prompt_text: str):
+    """Try multiple GenAI client call patterns to support different SDK versions.
+
+    Returns the raw response object from the first call that succeeds, or raises
+    RuntimeError with detailed attempt errors.
+    """
     config_payload = {
         "temperature": GENAI_TEMPERATURE,
         "max_output_tokens": GENAI_MAX_OUTPUT_TOKENS,
     }
 
-    last_error = None
-    methods = []
+    attempts = []
 
-    models = getattr(client, "models", None)
-    if models is not None and hasattr(models, "generate_content"):
-        methods.append(("models.generate_content", lambda: models.generate_content(
-            model=model_id,
-            contents=prompt_text,
-            config=config_payload,
-        )))
-        methods.append(("models.generate_content_without_config", lambda: models.generate_content(
-            model=model_id,
-            contents=prompt_text,
-        )))
-
-    if hasattr(client, "generate_content"):
-        methods.append(("client.generate_content", lambda: client.generate_content(
-            model=model_id,
-            contents=prompt_text,
-            config=config_payload,
-        )))
+    def try_call(name: str, fn):
+        try:
+            res = fn()
+            print(f"(Gemini) call succeeded: {name}")
+            return res
+        except TypeError as e:
+            attempts.append((name, e))
+            print(f"(Gemini) TypeError from {name}: {e}")
+            return None
+        except Exception as e:
+            attempts.append((name, e))
+            print(f"(Gemini) Exception from {name}: {e}")
+            return None
 
     interactions = getattr(client, "interactions", None)
+    responses_api = getattr(client, "responses", None)
+    models = getattr(client, "models", None)
+
+    # 1) Try interactions.create with extra_body (newer pattern)
     if interactions is not None and hasattr(interactions, "create"):
-        methods.append(("interactions.create_extra_body", lambda: interactions.create(
-            model=model_id,
-            input=prompt_text,
-            extra_body=config_payload,
-        )))
-        methods.append(("interactions.create_legacy", lambda: interactions.create(
-            model=model_id,
-            input=prompt_text,
-            temperature=GENAI_TEMPERATURE,
-            max_output_tokens=GENAI_MAX_OUTPUT_TOKENS,
-        )))
+        res = try_call("interactions.create(extra_body)", lambda: interactions.create(
+            model=model_id, input=prompt_text, extra_body=config_payload
+        ))
+        if res is not None:
+            return res
 
-    for _, call in methods:
-        try:
-            return call()
-        except TypeError as exc:
-            last_error = exc
-            continue
-        except Exception as exc:
-            last_error = exc
-            continue
+        # 1b) try simple interactions.create(model, input)
+        res = try_call("interactions.create(simple)", lambda: interactions.create(
+            model=model_id, input=prompt_text
+        ))
+        if res is not None:
+            return res
 
-    if last_error is not None:
-        raise RuntimeError(f"No supported Gemini API call worked: {last_error}")
+    # 2) Try client.responses.create (if present)
+    if responses_api is not None and hasattr(responses_api, "create"):
+        res = try_call("responses.create(extra_body)", lambda: responses_api.create(
+            model=model_id, input=prompt_text, extra_body=config_payload
+        ))
+        if res is not None:
+            return res
+
+        res = try_call("responses.create(simple)", lambda: responses_api.create(
+            model=model_id, input=prompt_text
+        ))
+        if res is not None:
+            return res
+
+    # 3) Try client.generate_content / models.generate_content variants
+    if hasattr(client, "generate_content"):
+        res = try_call("client.generate_content(config)", lambda: client.generate_content(
+            model=model_id, contents=prompt_text, config=config_payload
+        ))
+        if res is not None:
+            return res
+
+        res = try_call("client.generate_content(simple)", lambda: client.generate_content(
+            model=model_id, contents=prompt_text
+        ))
+        if res is not None:
+            return res
+
+    if models is not None and hasattr(models, "generate_content"):
+        res = try_call("models.generate_content(config)", lambda: models.generate_content(
+            model=model_id, contents=prompt_text, config=config_payload
+        ))
+        if res is not None:
+            return res
+
+        res = try_call("models.generate_content(simple)", lambda: models.generate_content(
+            model=model_id, contents=prompt_text
+        ))
+        if res is not None:
+            return res
+
+    # 4) Try client.generate_text (older/alternate name)
+    if hasattr(client, "generate_text"):
+        res = try_call("client.generate_text", lambda: client.generate_text(
+            model=model_id, prompt=prompt_text, temperature=GENAI_TEMPERATURE,
+            max_output_tokens=GENAI_MAX_OUTPUT_TOKENS
+        ))
+        if res is not None:
+            return res
+
+    # No method worked; raise with collected attempt errors for easier debugging
+    if attempts:
+        combined = "; ".join(f"{name}: {type(err).__name__}: {str(err)}" for name, err in attempts)
+        raise RuntimeError(f"No supported Gemini API call worked: {combined}")
 
     raise RuntimeError("No Gemini API method was available on the client instance.")
 
@@ -198,7 +244,7 @@ async def generate_response(instructions, history):
     if client is None:
         return "❌ Gemini client is not initialized. Check your API key."
 
-    model_id = config.get("MODEL_ID", "gemini-3.8-flash")
+    model_id = config.get("MODEL_ID", "gemini-2.5-flash")
 
     prompt_parts = []
     if instructions:
