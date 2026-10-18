@@ -29,23 +29,39 @@ def load_current_language():
     if os.path.exists(lang_path):
         with open(lang_path, "r", encoding="utf-8") as f:
             return json.load(f)
-    # Fallback to English if specified language file is missing
     fallback_path = "lang/lang.en.json"
     if os.path.exists(fallback_path):
         with open(fallback_path, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
+# 🚨 NEW: Memory cache for active channels
+_active_channels_cache = None
+
 def load_active_channels():
+    global _active_channels_cache
+    if _active_channels_cache is not None:
+        return _active_channels_cache
+        
     channels_path = "channels.json"
     if os.path.exists(channels_path):
         try:
             with open(channels_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
                 if not content:
-                    return {}
-                return json.load(f)
+                    _active_channels_cache = {}
+                    return _active_channels_cache
+                _active_channels_cache = json.load(f)
+                return _active_channels_cache
         except json.JSONDecodeError:
-            return {}
-    return {}
-    
+            _active_channels_cache = {}
+            return _active_channels_cache
+            
+    _active_channels_cache = {}
+    return _active_channels_cache
+
+def save_active_channels(channels):
+    global _active_channels_cache
+    _active_channels_cache = channels # Update memory instantly
+    with open("channels.json", "w", encoding="utf-8") as f:
+        json.dump(channels, f, indent=4)
