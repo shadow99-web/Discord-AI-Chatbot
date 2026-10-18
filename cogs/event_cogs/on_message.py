@@ -35,9 +35,16 @@ class OnMessage(commands.Cog):
             return
 
         instruc_config = active_channels.get(string_channel_id, config.get('DEFAULT_INSTRUCTION', 'assist'))
-        # Safe instruction lookup fallback
         selected_instruction = self.instructions.get(instruc_config, list(self.instructions.values())[0] if self.instructions else "")
         prompt_instructions = selected_instruction
+        # 🚨 DEBUG PRINTS 🚨
+        print(f"\n--- NEW MESSAGE ---")
+        print(f"Channel ID you are typing in: {string_channel_id}")
+        print(f"IDs saved in channels.json: {active_channels}")
+        print(f"Persona being loaded: {instruc_config}")
+        print(f"--------------------\n")
+
+
         channel_id = message.channel.id
         key = f"{message.author.id}-{channel_id}"
         message_history[key] = message_history.get(key, [])
